@@ -55,7 +55,7 @@ def classify_and_move_all_unclassified_images(request):
         if not file_path.lower().endswith(('.jpg', '.png')):
             try:
                 # Download, preprocess, and predict class for the image
-                with tempfile.NamedTemporaryFile(suffix=os.path.basename(file_path)) as temp_file:
+                with (tempfile.NamedTemporaryFile(suffix=os.path.basename(file_path)) as temp_file):
                     blob.download_to_filename(temp_file.name)
                     img = image.load_img(temp_file.name, target_size=(32, 32))
                     img_array = image.img_to_array(img) / 255.0
@@ -84,15 +84,26 @@ def classify_and_move_all_unclassified_images(request):
 
                     for doc in docs:
                         doc_ref = doc.reference  # Get the document reference
+
+                        # Getting the document's full path
+                        doc_path = doc.reference.path
                         doc_data = doc.to_dict()
+
+                        # Splitting the path to access individual segments
+                        path_segments = doc_path.split('/')
+
+                        # The timestamp (parent ID) is two segments before the 'images' segment, based on your structure
+                        timestamp_index = path_segments.index('images') - 1
+                        parent_id = path_segments[timestamp_index]
 
                         # Update the document data with the new classTag
                         doc_data['classTag'] = predicted_class
 
-                        doc_ref_classified = db.collection(predicted_class).document(imageName)
+                        # Constructing the new path for the document based on its predicted class
+                        doc_ref_classified = db.collection(predicted_class).document(parent_id).collection("images").document(imageName)
 
-                        # Set the document in the new location
-                        doc_ref_classified.set(doc_data)
+                        # Set the document with the new data
+                        doc_ref_classified.set(doc_data, merge=True)
 
                         # Delete the original document
                         doc_ref.delete()
