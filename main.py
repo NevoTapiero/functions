@@ -21,18 +21,13 @@ class_labels = [
     "Corn_northern_leaf_blight",
     "Corn_gray_leaf_spots"
 ]
-count_common_rust = 0
-corn_healthy = 0
-corn_Infected = 0
-corn_northern_leaf_blight = 0
-corn_gray_leaf_spots = 0
 
 count_dict_classes = {
-    "Corn_common_rust": count_common_rust,
-    "Corn_healthy": corn_healthy,
-    "Corn_Infected": corn_Infected,
-    "Corn_northern_leaf_blight": corn_northern_leaf_blight,
-    "Corn_gray_leaf_spots": corn_gray_leaf_spots
+    "Corn_common_rust": 0,
+    "Corn_healthy": 0,
+    "Corn_Infected": 0,
+    "Corn_northern_leaf_blight": 0,
+    "Corn_gray_leaf_spots": 0
 }
 
 
@@ -95,11 +90,14 @@ def classify_and_move_all_unclassified_images(request):
 
                     # Query Firestore for all documents with the imageName across all batches
                     docs = db.collection_group('images').where('imageName', '==', imageName).stream()
+
                     for doc in docs:
                         doc_ref = doc.reference  # Get the document reference
 
                         # Getting the document's full path
                         doc_path = doc.reference.path
+
+                        # Getting the document's data
                         doc_data = doc.to_dict()
 
                         # Splitting the path to access individual segments
