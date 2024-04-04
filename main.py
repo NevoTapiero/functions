@@ -6,6 +6,7 @@ from flask import jsonify
 from google.cloud import storage, firestore
 from keras.models import load_model
 from keras.preprocessing import image
+from google.cloud.firestore import Increment
 
 # Initialize Firebase Admin with your Firebase config
 cred = credentials.Certificate("msdk-app-3a2d5-fe27b66abfec.json")
@@ -20,6 +21,19 @@ class_labels = [
     "Corn_northern_leaf_blight",
     "Corn_gray_leaf_spots"
 ]
+count_common_rust = 0
+corn_healthy = 0
+corn_Infected = 0
+corn_northern_leaf_blight = 0
+corn_gray_leaf_spots = 0
+
+count_dict_classes = {
+    "Corn_common_rust": count_common_rust,
+    "Corn_healthy": corn_healthy,
+    "Corn_Infected": corn_Infected,
+    "Corn_northern_leaf_blight": corn_northern_leaf_blight,
+    "Corn_gray_leaf_spots": corn_gray_leaf_spots
+}
 
 
 def get_model(bucket):
@@ -81,7 +95,6 @@ def classify_and_move_all_unclassified_images(request):
 
                     # Query Firestore for all documents with the imageName across all batches
                     docs = db.collection_group('images').where('imageName', '==', imageName).stream()
-
                     for doc in docs:
                         doc_ref = doc.reference  # Get the document reference
 
@@ -99,8 +112,18 @@ def classify_and_move_all_unclassified_images(request):
                         # Update the document data with the new classTag
                         doc_data['classTag'] = predicted_class
 
+                        # Reference to the document holding the counts
+                        count_ref = db.collection("count_classified_classes").document("countDict")
+
+                        # Prepare the update dictionary using Increment for atomic increments
+                        update_dict = {predicted_class: Increment(1)}
+
+                        # Atomically update the count for the predicted class
+                        count_ref.set(update_dict, merge=True)
+
                         # Constructing the new path for the document based on its predicted class
-                        doc_ref_classified = db.collection(predicted_class).document(parent_id).collection("images").document(imageName)
+                        doc_ref_classified = db.collection(predicted_class).document(parent_id).collection(
+                            "images").document(imageName)
 
                         # Set the document with the new data
                         doc_ref_classified.set(doc_data, merge=True)
