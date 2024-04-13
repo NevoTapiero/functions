@@ -1,19 +1,20 @@
 import os
 import tempfile
 import tensorflow as tf
-from firebase_admin import credentials, firestore, initialize_app
+from firebase_admin import credentials, initialize_app, firestore, storage as firebase_storage
 from flask import jsonify
-from google.cloud import storage, firestore
+from google.cloud import storage
 from keras.models import load_model
 from keras.preprocessing import image
 from google.cloud.firestore import Increment
 
 # Initialize Firebase Admin with your Firebase config
 cred = credentials.Certificate("msdk-app-3a2d5-fe27b66abfec.json")
+app = initialize_app(cred, {
+    'storageBucket': 'msdk-app-3a2d5.appspot.com'
+})
 
-initialize_app(cred)
-
-# Define class labels (the same labels used during training)
+# Define class labels
 class_labels = [
     "Corn_common_rust",
     "Corn_healthy",
@@ -22,17 +23,11 @@ class_labels = [
     "Corn_gray_leaf_spots"
 ]
 
-count_dict_classes = {
-    "Corn_common_rust": 0,
-    "Corn_healthy": 0,
-    "Corn_Infected": 0,
-    "Corn_northern_leaf_blight": 0,
-    "Corn_gray_leaf_spots": 0
-}
 
-
-def get_model(bucket):
-    # Assumes model is stored in Cloud Storage
+def get_model():
+    # Initialize the Google Cloud Storage client and get model from the bucket
+    storage_client = storage.Client()
+    bucket = storage_client.bucket('msdk-app-3a2d5.appspot.com')
     model_blob = bucket.blob('mydataset_model.001.h5')
     with tempfile.NamedTemporaryFile(delete=False) as temp_model_file:
         model_blob.download_to_filename(temp_model_file.name)
@@ -41,94 +36,78 @@ def get_model(bucket):
     return model
 
 
+def process_images(user_id, batches):
+    db = firestore.client(app=app)
+    bucket = firebase_storage.bucket(app=app)
+
+    model = get_model()
+
+    # Reference to the document holding the counts
+    count_ref = db.collection("Users").document(user_id).collection("count_classified_classes").document("countDict")
+
+    for batch_name in batches:
+        # Path in Firestore for the batch
+        images_ref = db.collection("Users").document(user_id).collection("unclassified").document(batch_name).collection(
+            "images")
+        batch_ref = db.collection("Users").document(user_id).collection("unclassified").document(batch_name).get()
+        batch_doc = batch_ref.to_dict()
+        docs = images_ref.stream()
+
+        for doc in docs:
+            image_name = doc.id
+            image_data = doc.to_dict()
+            image_path = f"Users/{user_id}/unclassified/{image_name}"
+
+            # Download image from Cloud Storage
+            blob = bucket.blob(image_path)
+            with tempfile.NamedTemporaryFile() as temp_file:
+                blob.download_to_filename(temp_file.name)
+                img = image.load_img(temp_file.name, target_size=(32, 32))
+                img_array = image.img_to_array(img) / 255.0
+                img_array = tf.expand_dims(img_array, 0)  # Model expects a batch
+
+                predictions = model.predict(img_array)
+                predicted_class_index = tf.argmax(predictions, axis=1).numpy()[0]
+                predicted_class = class_labels[predicted_class_index]
+
+                # Update the document data with the new classTag
+                image_data['classTag'] = predicted_class
+
+                # Prepare the update dictionary using Increment for atomic increments
+                update_dict = {predicted_class: Increment(1)}
+
+                # Atomically update the count for the predicted class
+                count_ref.set(update_dict, merge=True)
+
+                # Move Firestore document to the new predicted class
+                new_doc_path = f"Users/{user_id}/{predicted_class}/{batch_name}/images/{image_name}"
+                new_image_ref = db.collection("Users").document(user_id).collection(predicted_class).document(
+                    batch_name).collection("images").document(image_name)
+                new_image_ref.set(image_data)
+
+                new_batch_ref = db.collection("Users").document(user_id).collection(predicted_class).document(
+                    batch_name)
+                new_batch_ref.set(batch_doc)
+
+                # Delete the original document
+                doc.reference.delete()
+
+                # Move the image in Cloud Storage
+                new_image_path = f"Users/{user_id}/{predicted_class}/{image_name}"
+                new_blob = bucket.blob(new_image_path)
+                new_blob.rewrite(blob)
+                blob.delete()
+    for batch_name in batches:
+        db.collection("Users").document(user_id).collection("unclassified").document(batch_name).delete()
+
+
 def classify_and_move_all_unclassified_images(request):
     if request.method != 'POST':
         return 'Only POST requests are accepted', 405
 
-    # Initialize the Google Cloud Storage client
-    storage_client = storage.Client()
-    bucket_name = 'msdk-app-3a2d5.appspot.com'
-    bucket = storage_client.bucket(bucket_name)
+    user_id = request.json.get('user_id')
+    batches = request.json.get('batches')
 
-    # Initialize Firestore client
-    db = firestore.Client()
+    process_images(user_id, batches)
 
-    # Load the model once at the beginning
-    model = get_model(bucket)
-
-    # List and process each image blob directly under 'unclassified/'
-    blobs = bucket.list_blobs(prefix="unclassified/")
-    for blob in blobs:
-        file_path = blob.name
-        print("the blob:" + "".join(blob.name))
-        if not file_path.lower().endswith(('.jpg', '.png')):
-            try:
-                # Download, preprocess, and predict class for the image
-                with (tempfile.NamedTemporaryFile(suffix=os.path.basename(file_path)) as temp_file):
-                    blob.download_to_filename(temp_file.name)
-                    img = image.load_img(temp_file.name, target_size=(32, 32))
-                    img_array = image.img_to_array(img) / 255.0
-                    img_array = tf.expand_dims(img_array, 0)  # Model expects a batch
-
-                    predictions = model.predict(img_array)
-
-                    # Predicted class from the model
-                    predicted_class_index = tf.argmax(predictions, axis=1).numpy()[0]
-                    predicted_class = class_labels[predicted_class_index]
-
-                    parts = file_path.split('/')
-                    imageName = parts[-1]  # This gets the last part of the path, which should be the image name
-
-                    # Constructing the new path for the blob based on its predicted class
-                    new_blob_path = f"classified/{predicted_class}/{imageName}"
-
-                    # Copy the blob to the new location in the 'classified' directory under the specific class
-                    new_blob = bucket.copy_blob(blob, bucket, new_blob_path)
-
-                    # Delete the original blob from the 'unclassified' directory
-                    blob.delete()
-
-                    # Query Firestore for all documents with the imageName across all batches
-                    docs = db.collection_group('images').where('imageName', '==', imageName).stream()
-
-                    for doc in docs:
-                        doc_ref = doc.reference  # Get the document reference
-
-                        # Getting the document's full path
-                        doc_path = doc.reference.path
-
-                        # Getting the document's data
-                        doc_data = doc.to_dict()
-
-                        # Splitting the path to access individual segments
-                        path_segments = doc_path.split('/')
-
-                        # The timestamp (parent ID) is two segments before the 'images' segment, based on your structure
-                        timestamp_index = path_segments.index('images') - 1
-                        parent_id = path_segments[timestamp_index]
-
-                        # Update the document data with the new classTag
-                        doc_data['classTag'] = predicted_class
-
-                        # Reference to the document holding the counts
-                        count_ref = db.collection("count_classified_classes").document("countDict")
-
-                        # Prepare the update dictionary using Increment for atomic increments
-                        update_dict = {predicted_class: Increment(1)}
-
-                        # Atomically update the count for the predicted class
-                        count_ref.set(update_dict, merge=True)
-
-                        # Constructing the new path for the document based on its predicted class
-                        doc_ref_classified = db.collection(predicted_class).document(parent_id).collection(
-                            "images").document(imageName)
-
-                        # Set the document with the new data
-                        doc_ref_classified.set(doc_data, merge=True)
-
-                        # Delete the original document
-                        doc_ref.delete()
-
-            except Exception as e:
-                print(f"Error processing {file_path}: {e}")
     return jsonify({"message": "Processed all unclassified images"})
