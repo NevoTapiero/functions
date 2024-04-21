@@ -98,6 +98,7 @@ def process_images(user_id, batches):
 
                 new_blob = bucket.blob(new_image_path)
 
+                # Rewrite the image blob with the new classTag
                 new_blob.rewrite(blob)
 
                 blob.delete()
