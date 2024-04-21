@@ -7,7 +7,6 @@ from google.cloud import storage
 from keras.models import load_model
 from keras.preprocessing import image
 from google.cloud.firestore import Increment
-import datetime
 
 # Initialize Firebase Admin with your Firebase config
 cred = credentials.Certificate("msdk-app-3a2d5-fe27b66abfec.json")
@@ -101,8 +100,7 @@ def process_images(user_id, batches):
                 new_blob.rewrite(blob)
 
                 # Get the new download URL
-                new_url = new_blob.generate_signed_url(version="v4", expiration=datetime.timedelta(minutes=10),
-                                                       method='GET')
+                new_url = new_blob.generate_signed_url(version="v4", method='GET')
 
                 # Update Firestore document with the new URL
                 new_image_ref.update({'imageUrl': new_url})
